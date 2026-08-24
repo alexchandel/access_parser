@@ -62,21 +62,27 @@ def test_parses_all_discovered_tables(
 
 def test_parses_schema_metadata(database: AccessParser) -> None:
     table = database.get_table("ClarotyTable")
+    properties = database.extra_props["ClarotyTable"]
 
     assert table is not None
+    assert properties is not None
     assert table.primary_keys == ["ID"]
-    assert database.extra_props["ClarotyTable"]["Field3"]["ColumnOrder"] == 4
+    assert properties["Field3"]["ColumnOrder"] == 4
 
 
 def test_parses_guid_and_binary_fields(database: AccessParser) -> None:
     name_map = database.parse_table("MSysNameMap")
     resources = database.parse_table("f_AF8292619150475ABBCC3E04860C1240_Data")
+    name_map_data = name_map["NameMap"][0]
+    file_data = resources["FileData"][0]
 
     assert name_map["GUID"] == ["8bb9d14a-0f9f-c746-a827-0165678e8cbd"]
-    assert len(name_map["NameMap"][0]) == 342
+    assert isinstance(name_map_data, bytes)
+    assert len(name_map_data) == 342
     assert resources["FileName"] == ["Office Theme.thmx"]
-    assert resources["FileData"][0].startswith(b"\x01\x00\x00\x00P\x0c\x00\x00x^")
-    assert len(resources["FileData"][0]) == 2794
+    assert isinstance(file_data, bytes)
+    assert file_data.startswith(b"\x01\x00\x00\x00P\x0c\x00\x00x^")
+    assert len(file_data) == 2794
 
 
 def test_prints_database(
@@ -106,3 +112,8 @@ def test_rejects_invalid_database(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Failed to parse DB file header"):
         AccessParser(invalid_database)
+
+
+def test_rejects_unknown_table(database: AccessParser) -> None:
+    with pytest.raises(KeyError, match="Unknown table: MissingTable"):
+        database.parse_table("MissingTable")

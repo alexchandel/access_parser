@@ -3,8 +3,17 @@ name = "access-parser"
 version = "0.1.0"
 description = "Access database (*.mdb, *.accdb) parser"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = [ "LICENSE" ]
+urls = { "source" = "https://github.com/ClarotyICS/access_parser" }
 authors = [
+    { name = "Uri Katz", email = "uri.k@claroty.com" },
     { name = "Alex Chandel", email = "637714+alexchandel@users.noreply.github.com" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
 ]
 requires-python = ">=3.14"
 dependencies = [
@@ -76,5 +85,6 @@ preview = true
 
 [dependency-groups]
 dev = [
+    "construct-typing>=0.8.1",
     "pytest>=9.1.1",
 ]
