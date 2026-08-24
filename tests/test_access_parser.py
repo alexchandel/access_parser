@@ -1,14 +1,22 @@
+import sqlite3
 import struct
 from collections import defaultdict
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from uuid import UUID
 
 import pytest
 
 from access_parser import AccessParser
-from access_parser.access_parser import AccessTable
-from access_parser.parsing_primitives import Column, RelativeMetadata
+from access_parser.access_parser import (
+    AccessTable,
+    ParsedTable,
+    _get_primary_keys,  # pyright: ignore[reportPrivateUsage]
+)
+from access_parser.parsing_primitives import Column, RelativeMetadata, TableHeader
 from access_parser.utils import TYPE_BINARY, TYPE_TEXT, ParsedValue
 
 EXPECTED_CATALOG = {
@@ -77,19 +85,42 @@ def test_parses_schema_metadata(database: AccessParser) -> None:
     assert properties["Field3"]["ColumnOrder"] == 4
 
 
+def test_primary_key_resolution_uses_stable_column_ids() -> None:
+    columns = [
+        cast("Column", SimpleNamespace(column_id=0, col_name_str="Other")),
+        cast("Column", SimpleNamespace(column_id=5, col_name_str="PrimaryKey")),
+    ]
+    table_header = cast(
+        "TableHeader",
+        SimpleNamespace(
+            all_indexes=[SimpleNamespace(idx_type=1, idx_col_num=0)],
+            real_index_2=[SimpleNamespace(unk_struct=[SimpleNamespace(col_id=5), SimpleNamespace(col_id=0xFFFF)])],
+        ),
+    )
+
+    assert _get_primary_keys(columns, table_header) == ["PrimaryKey"]
+
+
 def test_parses_guid_and_binary_fields(database: AccessParser) -> None:
     name_map = database.parse_table("MSysNameMap")
     resources = database.parse_table("f_AF8292619150475ABBCC3E04860C1240_Data")
     name_map_data = name_map["NameMap"][0]
     file_data = resources["FileData"][0]
 
-    assert name_map["GUID"] == ["8bb9d14a-0f9f-c746-a827-0165678e8cbd"]
+    assert name_map["GUID"] == [UUID("4ad1b98b-9f0f-46c7-a827-0165678e8cbd")]
     assert isinstance(name_map_data, bytes)
     assert len(name_map_data) == 342
     assert resources["FileName"] == ["Office Theme.thmx"]
+    assert resources["FileTimeStamp"] == [None]
     assert isinstance(file_data, bytes)
     assert file_data.startswith(b"\x01\x00\x00\x00P\x0c\x00\x00x^")
     assert len(file_data) == 2794
+
+
+def test_parses_access_dates_as_datetimes(database: AccessParser) -> None:
+    objects = database.parse_table("MSysObjects")
+
+    assert objects["DateCreate"][0] == datetime(2020, 7, 5, 14, 29, 3, 135_000)  # noqa: DTZ001
 
 
 def test_prints_database(
@@ -124,6 +155,83 @@ def test_rejects_invalid_database(tmp_path: Path) -> None:
 def test_rejects_unknown_table(database: AccessParser) -> None:
     with pytest.raises(KeyError, match="Unknown table: MissingTable"):
         database.parse_table("MissingTable")
+
+
+def test_runs_read_only_sql_queries(database: AccessParser) -> None:
+    connection = database.to_sqlite(["ClarotyTable"])
+
+    try:
+        assert connection.execute(
+            "SELECT Field1, Field3 FROM ClarotyTable WHERE ID > ?",
+            (1,),
+        ).fetchall() == [("test2", None)]
+        assert connection.execute("SELECT name FROM sqlite_schema WHERE type = 'table'").fetchall() == [
+            ("ClarotyTable",)
+        ]
+        assert connection.execute("PRAGMA query_only").fetchone() == (1,)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("DELETE FROM ClarotyTable")
+    finally:
+        connection.close()
+
+
+def test_sqlite_export_preserves_blobs(database: AccessParser) -> None:
+    connection = database.to_sqlite(["MSysNameMap"])
+
+    try:
+        value = connection.execute("SELECT GUID, NameMap FROM MSysNameMap").fetchone()
+        assert value is not None
+        assert value[0] == "4ad1b98b-9f0f-46c7-a827-0165678e8cbd"
+        assert isinstance(value[1], bytes)
+        assert len(value[1]) == 342
+    finally:
+        connection.close()
+
+
+def test_sqlite_export_quotes_identifiers_and_keeps_empty_tables(monkeypatch: pytest.MonkeyPatch) -> None:
+    parser = AccessParser.__new__(AccessParser)
+    parser.catalog = {'select "table"': 1, "empty": 2}
+
+    def parse_table(table_name: str) -> ParsedTable:
+        if table_name == "empty":
+            return defaultdict(list, {"value": []})
+        return defaultdict(list, {'from "column"': [1]})
+
+    monkeypatch.setattr(parser, "parse_table", parse_table)
+    connection = parser.to_sqlite()
+
+    try:
+        assert connection.execute('SELECT "from ""column""" FROM "select ""table"""').fetchall() == [(1,)]
+        assert connection.execute("SELECT COUNT(*) FROM empty").fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_sqlite_export_normalizes_semantic_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    parser = AccessParser.__new__(AccessParser)
+    parser.catalog = {"types": 1}
+
+    def parse_table(_table_name: str) -> ParsedTable:
+        return defaultdict(
+            list,
+            {
+                "timestamp": [datetime(2020, 7, 5, 14, 29, 3, 135_000)],  # noqa: DTZ001
+                "guid": [UUID("4ad1b98b-9f0f-46c7-a827-0165678e8cbd")],
+                "amount": [Decimal("12.3400")],
+            },
+        )
+
+    monkeypatch.setattr(parser, "parse_table", parse_table)
+    connection = parser.to_sqlite()
+
+    try:
+        assert connection.execute("SELECT timestamp, guid, amount FROM types").fetchone() == (
+            "2020-07-05 14:29:03.135000",
+            "4ad1b98b-9f0f-46c7-a827-0165678e8cbd",
+            "12.3400",
+        )
+    finally:
+        connection.close()
 
 
 def test_jet3_jump_table_offsets_are_independent_of_null_fields() -> None:

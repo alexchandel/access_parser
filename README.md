@@ -27,10 +27,41 @@ print(db.catalog)
 # Tables are stored as defaultdict(list) -- table[column][row_index]
 table = db.parse_table("table_name")
 
+# Access values use their corresponding Python types. In particular:
+# Date/Time -> datetime.datetime, GUID -> uuid.UUID,
+# Currency and Numeric/Decimal -> decimal.Decimal.
+
 # Pretty print all tables
 db.print_database()
 
 ```
+
+## SQL Queries
+
+Copy some or all parsed tables into a query-only, in-memory SQLite database:
+
+```python
+db = AccessParser("/path/to/mdb/file.mdb")
+sql = db.to_sqlite(["Customers", "Orders"])
+
+rows = sql.execute(
+    """
+    SELECT Customers.Name, SUM(Orders.Total)
+    FROM Customers
+    JOIN Orders ON Orders.CustomerID = Customers.ID
+    GROUP BY Customers.Name
+    """
+).fetchall()
+
+sql.close()
+```
+
+Omit the table list to import every table in `db.catalog`. The original Access
+database is never modified; selected tables are fully parsed and copied into
+memory before SQLite runs the query. Date/Time and GUID values are copied as
+canonical text. Currency and Numeric/Decimal values are also copied as exact
+text because SQLite has no arbitrary-precision decimal storage class; SQLite's
+built-in numeric arithmetic may coerce those values to inexact floating point.
 
 ### Known Issues
 * 

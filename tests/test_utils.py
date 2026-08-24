@@ -1,15 +1,11 @@
 import struct
 import uuid
+from datetime import datetime
+from decimal import Decimal
 
 import pytest
 
 from access_parser.utils import (
-    FORMAT_DOLLAR,
-    FORMAT_EURO,
-    FORMAT_FIXED,
-    FORMAT_GENERAL_NUMBER,
-    FORMAT_PERCENT,
-    FORMAT_SCIENTIFIC,
     TYPE_BINARY,
     TYPE_COMPLEX,
     TYPE_DATETIME,
@@ -20,11 +16,11 @@ from access_parser.utils import (
     TYPE_INT16,
     TYPE_INT32,
     TYPE_MONEY,
+    TYPE_NUMERIC,
     TYPE_OLE,
     TYPE_TEXT,
-    TYPE_96_bit_17_BYTES,
     categorize_pages,
-    numeric_to_string,
+    numeric_to_decimal,
     parse_type,
 )
 
@@ -45,45 +41,21 @@ def test_parse_type_decodes_fixed_width_values(data_type: int, buffer: bytes, ex
 
 
 @pytest.mark.parametrize(
-    ("field_format", "expected"),
+    ("stored_value", "expected"),
     [
-        (FORMAT_DOLLAR, "$12.35"),
-        (FORMAT_EURO, "€12.35"),
-        (FORMAT_PERCENT, "1234.56%"),
-        (FORMAT_GENERAL_NUMBER, "12.3"),
-        (FORMAT_FIXED, "12.35"),
-        (FORMAT_SCIENTIFIC, "1.23e+01"),
+        (123_456, Decimal("12.3456")),
+        (0, Decimal("0.0000")),
+        (-123_456, Decimal("-12.3456")),
     ],
 )
-def test_parse_type_formats_money(field_format: str, expected: str) -> None:
-    assert parse_type(TYPE_MONEY, struct.pack("<q", 123_456), props={"Format": field_format}) == expected
-
-
-@pytest.mark.parametrize(
-    ("field_format", "expected"),
-    [
-        (FORMAT_DOLLAR, "$0.00"),
-        (FORMAT_EURO, "€0.00"),
-        (FORMAT_PERCENT, "0.00%"),
-        (FORMAT_GENERAL_NUMBER, "0"),
-        (FORMAT_FIXED, "0.00"),
-        (FORMAT_SCIENTIFIC, "0.00E+00"),
-    ],
-)
-def test_parse_type_uses_money_defaults(field_format: str, expected: str) -> None:
-    assert parse_type(TYPE_MONEY, struct.pack("<q", 0), props={"Format": field_format}) == expected
-
-
-def test_parse_type_leaves_unformatted_money_numeric() -> None:
-    assert parse_type(TYPE_MONEY, struct.pack("<q", 123_456)) == 123_456
-    assert parse_type(TYPE_MONEY, struct.pack("<q", 0), props={"Format": "Unknown"}) == 0
+def test_parse_type_decodes_money_exactly(stored_value: int, expected: Decimal) -> None:
+    assert parse_type(TYPE_MONEY, struct.pack("<q", stored_value)) == expected
 
 
 def test_parse_type_decodes_access_dates() -> None:
-    one_and_a_half_days = struct.unpack("<q", struct.pack("<d", 1.5))[0]
-
-    assert parse_type(TYPE_DATETIME, struct.pack("<q", 0)) == "(Empty Date)"
-    assert parse_type(TYPE_DATETIME, struct.pack("<q", one_and_a_half_days)) == "1899-12-31 12:00:00"
+    assert parse_type(TYPE_DATETIME, struct.pack("<d", 0)) == datetime(1899, 12, 30)  # noqa: DTZ001
+    assert parse_type(TYPE_DATETIME, struct.pack("<d", 1.5)) == datetime(1899, 12, 31, 12)  # noqa: DTZ001
+    assert parse_type(TYPE_DATETIME, struct.pack("<d", -1.25)) == datetime(1899, 12, 29, 6)  # noqa: DTZ001
 
 
 @pytest.mark.parametrize(
@@ -106,22 +78,22 @@ def test_parse_type_decodes_byte_fields_and_guid() -> None:
 
     assert parse_type(TYPE_BINARY, payload, length=5) == payload[:5]
     assert parse_type(TYPE_OLE, payload) == payload
-    assert parse_type(TYPE_96_bit_17_BYTES, payload) == payload[:17]
-    assert parse_type(TYPE_GUID, guid.bytes) == str(guid)
+    assert parse_type(TYPE_GUID, guid.bytes_le) == guid
 
 
 @pytest.mark.parametrize(
-    ("negative", "scale", "expected"),
+    ("sign", "scale", "expected"),
     [
-        (0, 6, "149.804168"),
-        (1, 6, "-149.804168"),
-        (0, 10, "149804168"),
+        (0, 6, Decimal("149.804168")),
+        (0x80, 6, Decimal("-149.804168")),
+        (0, 10, Decimal("0.0149804168")),
     ],
 )
-def test_numeric_to_string(negative: int, scale: int, expected: str) -> None:
-    numeric = struct.pack("<BIIII", negative, 0, 0, 0, 149_804_168)
+def test_numeric_to_decimal(sign: int, scale: int, expected: Decimal) -> None:
+    numeric = struct.pack("<BIIII", sign, 0, 0, 0, 149_804_168)
 
-    assert numeric_to_string(numeric, scale) == expected
+    assert numeric_to_decimal(numeric, scale) == expected
+    assert parse_type(TYPE_NUMERIC, numeric, scale=scale) == expected
 
 
 def test_categorize_pages() -> None:

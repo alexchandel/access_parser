@@ -2,9 +2,14 @@
 
 import logging
 import os
+import sqlite3
 import struct
 from collections import defaultdict
+from collections.abc import Iterable
+from datetime import datetime
+from decimal import Decimal
 from typing import cast
+from uuid import UUID
 
 from construct import ConstructError
 from tabulate import tabulate
@@ -25,13 +30,12 @@ from .parsing_primitives import (
 from .utils import (
     TYPE_BOOLEAN,
     TYPE_MEMO,
+    TYPE_NUMERIC,
     TYPE_OLE,
     TYPE_TEXT,
     PageMap,
     ParsedValue,
-    TYPE_96_bit_17_BYTES,
     categorize_pages,
-    numeric_to_string,
     parse_type,
     read_db_file,
 )
@@ -57,6 +61,28 @@ NEW_VERSIONS = [VERSION_4, VERSION_5, VERSION_2010]
 SYSTEM_TABLE_FLAGS = [-0x80000000, -0x00000002, 0x80000000, 0x00000002]
 
 LOGGER = logging.getLogger("access_parser")
+
+
+def _quote_sqlite_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _to_sqlite_value(value: ParsedValue) -> bool | bytes | float | int | str | None:
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="microseconds")
+    if isinstance(value, (Decimal, UUID)):
+        return str(value)
+    return value
+
+
+def _get_primary_keys(columns: list[Column], table_header: TableHeader) -> list[str]:
+    columns_by_id = {column.column_id: column for column in columns}
+    return [
+        columns_by_id[index_column.col_id].col_name_str
+        for index in table_header.all_indexes
+        for index_column in table_header.real_index_2[index.idx_col_num].unk_struct
+        if index.idx_type == 1 and index_column.col_id != 0xFFFF
+    ]
 
 
 class TableObj:
@@ -227,6 +253,37 @@ class AccessParser:
             raise KeyError(f"Unknown table: {table_name}")
         return table.parse()
 
+    def to_sqlite(self, tables: Iterable[str] | None = None) -> sqlite3.Connection:
+        """Copy tables into a query-only, in-memory SQLite database."""
+        connection = sqlite3.connect(":memory:")
+        table_names = self.catalog if tables is None else tables
+
+        try:
+            with connection:
+                for table_name in table_names:
+                    table = self.parse_table(table_name)
+                    columns = list(table)
+                    quoted_table = _quote_sqlite_identifier(table_name)
+                    definitions = ", ".join(_quote_sqlite_identifier(column) for column in columns)
+                    connection.execute(f"CREATE TABLE {quoted_table} ({definitions})")
+
+                    if columns:
+                        placeholders = ", ".join("?" for _ in columns)
+                        rows = (
+                            tuple(_to_sqlite_value(value) for value in row)
+                            for row in zip(*(table[column] for column in columns), strict=True)
+                        )
+                        # Table names are quoted as SQLite identifiers above.
+                        insert_sql = f"INSERT INTO {quoted_table} VALUES ({placeholders})"  # noqa: S608
+                        connection.executemany(insert_sql, rows)
+
+            connection.execute("PRAGMA query_only = ON")
+        except Exception:
+            connection.close()
+            raise
+
+        return connection
+
     def print_database(self) -> None:
         """Print data from all database tables."""
         table_names = self.catalog
@@ -379,14 +436,20 @@ class AccessTable:
         if column.type == TYPE_BOOLEAN:
             parsed_type = has_value
         else:
+            if not has_value:
+                self.parsed_table[column_name].append(None)
+                return
             if column.fixed_offset > len(original_record):
                 LOGGER.error(f"Column offset is bigger than the length of the record {column.fixed_offset}")
                 return
             record = original_record[column.fixed_offset :]
-            parsed_type = parse_type(column.type, record, version=self.version, props=column.extra_props or None)
-            if not has_value:
-                self.parsed_table[column_name].append(None)
-                return
+            scale = column.various.get("scale", 0)
+            parsed_type = parse_type(
+                column.type,
+                record,
+                version=self.version,
+                scale=scale if isinstance(scale, int) else 0,
+            )
         self.parsed_table[column_name].append(parsed_type)
 
     def _parse_dynamic_length_records_metadata(
@@ -507,14 +570,20 @@ class AccessTable:
             except ConstructError:
                 LOGGER.warning("Failed to parse memo or OLE field. Using data as bytes")
                 return data
-        if column.type != TYPE_96_bit_17_BYTES:
+        if column.type != TYPE_NUMERIC:
             return parse_type(column.type, data, len(data), version=self.version)
         if len(data) != 17:
             LOGGER.warning(f"Relative numeric field has invalid length {len(data)}, expected 17")
             return data
 
         scale = column.various.get("scale", 6)
-        return numeric_to_string(data, scale if isinstance(scale, int) else 6)
+        return parse_type(
+            column.type,
+            data,
+            len(data),
+            version=self.version,
+            scale=scale if isinstance(scale, int) else 6,
+        )
 
     def _get_table_columns(self) -> tuple[dict[int, Column], list[str], TableHeader]:
         """Parse columns for a specific table."""
@@ -567,12 +636,7 @@ class AccessTable:
                 if col.col_name_str in self.props:
                     col.extra_props = self.props[col.col_name_str]
 
-        primary_keys = [
-            column_dict[col.col_id].col_name_str
-            for idx in table_header.all_indexes
-            for col in table_header.real_index_2[idx.idx_col_num].unk_struct
-            if idx.idx_type == 1 and col.col_id != 0xFFFF
-        ]
+        primary_keys = _get_primary_keys(columns, table_header)
 
         if len(column_dict) != table_header.column_count:
             LOGGER.debug(f"expected {table_header.column_count} columns got {len(column_dict)}")
