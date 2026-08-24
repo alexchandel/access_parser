@@ -191,7 +191,7 @@ class AccessParser:
     def parse_lvprop(self, lvprop_raw: bytes) -> TableProperties | None:
         """Parse table and column properties from an LVPROP value."""
         try:
-            parsed = parse_lvprop_value(lvprop_raw)
+            parsed = parse_lvprop_value(lvprop_raw, version=self.version)
         except ConstructError:
             return None
         if not parsed.chunks:
@@ -466,7 +466,13 @@ class AccessTable:
         :param null_table: list indicating which columns have null value.
         """
         relative_offsets = relative_record_metadata.variable_length_field_offsets
-        jump_table_addition = 0
+        jump_table = relative_record_metadata.variable_length_jump_table or []
+
+        def absolute_offset(offset: int, index: int) -> int:
+            if self.version != 3:
+                return offset
+            return offset + 0x100 * sum(jump_index <= index for jump_index in jump_table)
+
         for i, column_index in enumerate(relative_records_column_map):
             column = relative_records_column_map[column_index]
             col_name = column.col_name_str
@@ -479,21 +485,19 @@ class AccessTable:
                 self.parsed_table[col_name].append(None)
                 continue
 
-            if self.version == 3 and i in (relative_record_metadata.variable_length_jump_table or []):
-                jump_table_addition += 0x100
-            rel_start = relative_offsets[i]
+            rel_start = absolute_offset(relative_offsets[i], i)
             # If this is the last one use var_len_count as end offset
             if i + 1 == len(relative_offsets):
-                rel_end = relative_record_metadata.var_len_count
+                rel_end = absolute_offset(relative_record_metadata.var_len_count, i + 1)
             else:
-                rel_end = relative_offsets[i + 1]
+                rel_end = absolute_offset(relative_offsets[i + 1], i + 1)
 
             # if rel_start and rel_end are the same there is no data in this slot
             if rel_start == rel_end:
                 self.parsed_table[col_name].append("")
                 continue
 
-            relative_obj_data = original_record[rel_start + jump_table_addition : rel_end + jump_table_addition]
+            relative_obj_data = original_record[rel_start:rel_end]
             self.parsed_table[col_name].append(self._parse_variable_value(column, relative_obj_data))
 
     def _parse_variable_value(self, column: Column, data: bytes) -> ParsedValue:

@@ -1,8 +1,15 @@
+import struct
+from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from access_parser import AccessParser
+from access_parser.access_parser import AccessTable
+from access_parser.parsing_primitives import Column, RelativeMetadata
+from access_parser.utils import TYPE_BINARY, TYPE_TEXT, ParsedValue
 
 EXPECTED_CATALOG = {
     "MSysObjects": 2,
@@ -117,3 +124,56 @@ def test_rejects_invalid_database(tmp_path: Path) -> None:
 def test_rejects_unknown_table(database: AccessParser) -> None:
     with pytest.raises(KeyError, match="Unknown table: MissingTable"):
         database.parse_table("MissingTable")
+
+
+def test_jet3_jump_table_offsets_are_independent_of_null_fields() -> None:
+    record = bytearray(268)
+    record[250:260] = b"a" * 10
+    record[260:264] = b"b" * 4
+    record[264:268] = b"c" * 4
+    columns: dict[int, Column] = {
+        index: cast(
+            "Column",
+            SimpleNamespace(type=TYPE_BINARY, column_id=index, col_name_str=f"column_{index}"),
+        )
+        for index in range(3)
+    }
+    metadata = cast(
+        "RelativeMetadata",
+        SimpleNamespace(
+            variable_length_field_offsets=[250, 4, 8],
+            variable_length_jump_table=[1],
+            var_len_count=12,
+        ),
+    )
+    table = AccessTable.__new__(AccessTable)
+    table.version = 3
+    table.parsed_table = defaultdict[str, list[ParsedValue]](list)
+
+    table._parse_dynamic_length_data(  # pyright: ignore[reportPrivateUsage]
+        bytes(record), metadata, columns, [True, False, True]
+    )
+
+    assert table.parsed_table == {
+        "column_0": [b"a" * 10],
+        "column_1": [None],
+        "column_2": [b"c" * 4],
+    }
+
+
+def test_parses_single_byte_jet3_lvprop_names() -> None:
+    property_name = b"Description"
+    column_name = b"Notes"
+    value = b"hello"
+    name_body = struct.pack("<H", len(property_name)) + property_name
+    name_chunk = struct.pack("<IH", 6 + len(name_body), 128) + name_body
+    property_data = struct.pack("<HBBHH", 8 + len(value), 0, TYPE_TEXT, 0, len(value)) + value
+    value_body = struct.pack("<IH", 6 + len(column_name) + len(property_data), len(column_name))
+    value_body += column_name + property_data
+    value_chunk = struct.pack("<IH", 6 + len(value_body), 1) + value_body
+    parser = AccessParser.__new__(AccessParser)
+    parser.version = 3
+
+    assert parser.parse_lvprop(b"KKD\0" + name_chunk + value_chunk) == {
+        "Notes": {"Description": "hello"},
+    }

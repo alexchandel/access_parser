@@ -238,54 +238,51 @@ _TDEF_HEADER = Struct(
     "header_end" / Tell,
 )
 
-LVPROP_CHUNK_NAMES_INT = Struct(
-    "name_length" / Int16ul,
-    "name" / PaddedString(this.name_length, "utf16"),
-)
-LVPROP_CHUNK_NAMES = Struct(
-    "names" / GreedyRange(LVPROP_CHUNK_NAMES_INT),
-    # "leftover" / GreedyBytes
-)
-LVPROP_DATA = Struct(
-    "data_length" / Int16ul,
-    "ddl_flag" / Int8ul,
-    "type" / Int8ul,
-    "name_index" / Int16ul,
-    "only_data_length" / Int16ul,
-    "actual_data" / Bytes(this.only_data_length),
-)
-LVPROP_VALUE = Struct(
-    "val_length" / Int32ul,
-    "name_length" / Int16ul,
-    "column_name" / PaddedString(this.name_length, "utf16"),
-    "data" / GreedyRange(LVPROP_DATA),
-    "left" / GreedyBytes,
-)
 
-LVPROP_CHUNK = Struct(
-    "length" / Int32ul,
-    "chunk_type" / Int16ul,
-    "data"
-    / Prefixed(
-        cast("Construct[int, int]", Computed(this.length - 6)),
-        Switch(
-            this.chunk_type,
-            {
-                # 128: GreedyRange(LVPROP_CHUNK_NAMES)
-                128: LVPROP_CHUNK_NAMES,
-                0: LVPROP_VALUE,
-                1: LVPROP_VALUE,
-            },
-            default=Bytes(this.length - 4),
+def _make_lvprop_parser(encoding: str) -> Struct:
+    chunk_names = Struct(
+        "names"
+        / GreedyRange(
+            Struct(
+                "name_length" / Int16ul,
+                "name" / PaddedString(this.name_length, encoding),
+            )
         ),
-    ),
-)
-_LVPROP = Struct(
-    #'KKD\0' in Jet3 and 'MR2\0' in Jet 4.
-    "magic" / Bytes(4),
-    "chunks" / GreedyRange(LVPROP_CHUNK),
-    "leftover" / GreedyBytes,
-)
+    )
+    data = Struct(
+        "data_length" / Int16ul,
+        "ddl_flag" / Int8ul,
+        "type" / Int8ul,
+        "name_index" / Int16ul,
+        "only_data_length" / Int16ul,
+        "actual_data" / Bytes(this.only_data_length),
+    )
+    value = Struct(
+        "val_length" / Int32ul,
+        "name_length" / Int16ul,
+        "column_name" / PaddedString(this.name_length, encoding),
+        "data" / GreedyRange(data),
+        "left" / GreedyBytes,
+    )
+    chunk = Struct(
+        "length" / Int32ul,
+        "chunk_type" / Int16ul,
+        "data"
+        / Prefixed(
+            cast("Construct[int, int]", Computed(this.length - 6)),
+            Switch(this.chunk_type, {128: chunk_names, 0: value, 1: value}, default=Bytes(this.length - 4)),
+        ),
+    )
+    return Struct(
+        # 'KKD\0' in Jet3 and 'MR2\0' in Jet 4.
+        "magic" / Bytes(4),
+        "chunks" / GreedyRange(chunk),
+        "leftover" / GreedyBytes,
+    )
+
+
+_LVPROP_V3 = _make_lvprop_parser("utf8")
+_LVPROP_V4 = _make_lvprop_parser("utf16")
 
 
 def parse_access_header(buffer: bytes) -> AccessHeader:
@@ -303,9 +300,10 @@ def parse_tdef_header(buffer: bytes) -> TDefHeader:
     return cast("TDefHeader", _TDEF_HEADER.parse(buffer))
 
 
-def parse_lvprop(buffer: bytes) -> LvProp:
+def parse_lvprop(buffer: bytes, version: int = 4) -> LvProp:
     """Parse an LVPROP metadata value."""
-    return cast("LvProp", _LVPROP.parse(buffer))
+    parser = _LVPROP_V3 if version == 3 else _LVPROP_V4
+    return cast("LvProp", parser.parse(buffer))
 
 
 def parse_table_head(buffer: bytes, version: int = 3) -> TableHeader:
