@@ -269,6 +269,29 @@ def test_jet3_jump_table_offsets_are_independent_of_null_fields() -> None:
     }
 
 
+@pytest.mark.parametrize("version", [3, 4])
+@pytest.mark.parametrize("end_flags", [0, 0x4000, 0x8000, 0xC000])
+@pytest.mark.parametrize("end_offset", [0x400, 0x401])
+def test_overflow_record_masks_adjacent_row_flags(version: int, end_flags: int, end_offset: int) -> None:
+    page_size = 2048 if version == 3 else 4096
+    record = b"overflow row"
+    start_offset = end_offset - len(record)
+    page = bytearray(page_size)
+    header = struct.pack("<2sHI", b"\x01\x01", 0, 1)
+    if version > 3:
+        header += b"\0" * 4
+    header += struct.pack("<HHH", 2, end_offset | end_flags, start_offset | 0x8000)
+    page[: len(header)] = header
+    page[start_offset:end_offset] = record
+    page[end_offset:] = b"x" * (page_size - end_offset)
+    table = AccessTable.__new__(AccessTable)
+    table.version = version
+    table.page_size = page_size
+    table._data_pages = {page_size: bytes(page)}  # pyright: ignore[reportPrivateUsage]
+
+    assert table._get_overflow_record(0x101) == record  # pyright: ignore[reportPrivateUsage]
+
+
 def test_parses_single_byte_jet3_lvprop_names() -> None:
     property_name = b"Description"
     column_name = b"Notes"

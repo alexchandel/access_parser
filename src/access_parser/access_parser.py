@@ -700,7 +700,9 @@ class AccessTable:
         return None
 
     def _get_overflow_record(self, record_pointer: int) -> bytes | None:
-        """Get the actual record from a record pointer.
+        """Read the row addressed by an overflow record pointer.
+
+        Strip flags from row boundaries before slicing the data page.
 
         :param record_pointer:
         :return: record.
@@ -723,8 +725,6 @@ class AccessTable:
         if record_offset == 0:
             record = record_page[start:]
         else:
-            end = parsed_data.record_offsets[record_offset - 1]
-            if end & 0x8000 and (end & 0xFF != 0):
-                end = end & 0xFFF
+            end = parsed_data.record_offsets[record_offset - 1] & 0xFFF
             record = record_page[start:end]
         return record

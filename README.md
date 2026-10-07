@@ -4,6 +4,9 @@ Microsoft Access (.mdb / .accdb) database files parser. The parsing logic is ful
 # Installing
 Use pip: `pip install access-parser`
 
+Requires Python 3.14 or newer. The package includes inline type information
+for type checkers.
+
 Or install from source with uv:
 ```bash
 git clone https://github.com/ClarotyICS/access_parser.git
